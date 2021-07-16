@@ -6,7 +6,7 @@ from scipy.signal import savgol_filter
 import scipy.stats as st
 
 # parameters for Savgol filter
-windowlength = 41
+windowlength = 21
 polyorder = 3
 
 # Matplotlib default plot size
@@ -28,10 +28,10 @@ def cd(newdir):
         os.chdir(prevdir)
 
 # Silicon reference reflectivity for Si with .2 nm of SiO2
-from SiSiO2_theor import model_x, model_r, model_std
+import SiSiO2_theor 
 
 # hot pixels
-hp = [652, 653]
+hp = [852]  # wavelength in nm
 
 def load_avg_spectrum(filename, plot=False):
     """ 
@@ -88,7 +88,13 @@ def pickable_legend(ax):
         
     ax.figure.canvas.mpl_connect('pick_event', onpick)
 
-    
+def interp_nans(x, y):
+    # linear interpolation of NaN values in y array
+    isnan = np.isnan(y)
+    if isnan.any():
+        y[isnan] = np.interp(x[isnan], x[~isnan], y[~isnan]).flatten()
+    return y
+
 def plot_spectrum(x, sp, window=slice(None), ax=None, std=None, 
                   smooth=False, ylabel='Reflectance', **kwargs):
     # std: half-width of the error bar to plot
@@ -108,15 +114,13 @@ def plot_spectrum(x, sp, window=slice(None), ax=None, std=None,
     s = sp
     
     if smooth:
-        if np.any(np.isnan(s)):
-            s[hp] = np.interp(hp, x, s)  # if there are NaNs, then hot pixels have been filtered, so interpolate them
-        s = savgol_filter(s, window_length=windowlength, polyorder=polyorder)
+        s = savgol_filter(interp_nans(x, s), window_length=windowlength, polyorder=polyorder)
     
     p = ax.plot(x[window], s[window], **kwargs)
     
     if std is not None:
         if smooth:
-            std = savgol_filter(std, window_length=windowlength, polyorder=polyorder)
+            std = savgol_filter(interp_nans(x, std), window_length=windowlength, polyorder=polyorder)
         ax.fill_between(x[window], s[window] - std[window], s[window] + std[window],
                         color=p[0].get_color(), alpha=0.2)
     
@@ -182,21 +186,35 @@ def plot_measurement(refms, samplems, alref, window=slice(None), ax=None,
     sample_stderr = np.std(sample_i, axis=0) / np.sqrt(len(sample))
         
     R = nref_r * sample_mean / ref_mean
-    std = np.abs(R) * np.sqrt(
-        (sample_stderr/sample_mean)**2 + (ref_stderr/ref_mean)**2
-    )  # error propagation (propagating standard error instead of std)
-    n = min(len(ref), len(sample))  # sample size
-    critical_value = st.t.ppf(.5 + ci/2, df=n-1)  # ppf returns the one-sided value
-    ci_hw = critical_value * std / np.sqrt(n)  # confidence interval half width
-    logger.info(f"ref n {len(ref)}, sample n {len(sample)}, \
-                 critical value {critical_value:.3f}")
-    
     # remove hot pixels
-    R[hp] = np.NaN
-    ci_hw[hp] = np.NaN
+    hp_in_x = np.isin(x, hp)
+    R[hp_in_x] = np.NaN
+
+    if ax is None:
+        fig, ax = plt.subplots()
+        fig.suptitle(f"Reflectance measurement with ref {refms[0]}")
     
-    ax = plot_spectrum(x, R, window, ax=ax, std=ci_hw, label=label, **kwargs)
-    ax.set_title(f"({ci*100:.1f}% confidence interval)", fontsize=10)
+    n = min(len(ref), len(sample))  # sample size
+
+    if n > 1:
+        # more than one sample: we can calculate t statistic
+        std = np.abs(R) * np.sqrt(
+            (sample_stderr/sample_mean)**2 + (ref_stderr/ref_mean)**2
+        )  # error propagation (propagating standard error instead of std)
+        critical_value = st.t.ppf(.5 + ci/2, df=n-1)  # ppf returns the one-sided value
+        ci_hw = critical_value * std / np.sqrt(n)  # confidence interval half width
+        logger.info(f"ref n {len(ref)}, sample n {len(sample)}, \
+                     critical value {critical_value:.3f}")
+        ci_hw[hp_in_x] = np.NaN  # remove hot pixels
+        ax.set_title(f"({ci*100:.1f}% confidence interval)", fontsize=10)
+
+    else: 
+        ci_hw = None
+        
+    if label is None:
+        label = f"{samplems[0]}, {n} measurements"
+    
+    plot_spectrum(x, R, window, ax=ax, std=ci_hw, label=label, **kwargs)
 
     if ylabel is None:
         ylabel = 'Reflectance'
