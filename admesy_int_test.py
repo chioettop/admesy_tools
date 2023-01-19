@@ -3,12 +3,25 @@ from time import sleep
 from datetime import date
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
 import pyvisa
 
-assert len(sys.argv) == 2
+parser = argparse.ArgumentParser()
+parser.add_argument("name", 
+                    help="name of file")
+parser.add_argument("start", type=int, 
+                    help="start integration time in microseconds")
+parser.add_argument("stop", type=int, 
+                    help="stop integration time in microseconds")                 
+parser.add_argument("-s", "--step", type=int, default=1000, 
+                    help="integration time step in microseconds")
+parser.add_argument("-d", "--delay", type=float, default=0.1, 
+                    help="delay between measurements in seconds")
+parser.add_argument("-m", "--n_meas", type=int, default= 30,
+                    help="number of measurements to make")
+args = parser.parse_args()
 
-n_meas = 30
-delay = 0.2  # s
+delay = args.delay  # s
 
 rm = pyvisa.ResourceManager('C:\WINDOWS\system32\\visa64.dll')
 #rm.list_resources()
@@ -32,8 +45,8 @@ s = np.frombuffer(hera.read_raw(), dtype='>f')
 """
 
 init_commands = {
-    ':SENS:INT': '15000', 
-    ':SENS:SP:AVERAGE': '10', 
+    ':SENS:INT': str(args.start), 
+    ':SENS:SP:AVERAGE': '1', 
     ':SENS:CAL': '0',
     ':SENS:SP:SBW':  'off',
     ':SENS:AUTORANGE': '0',
@@ -48,27 +61,43 @@ for command, value in init_commands.items():
 #for command in init_commands:
 #    print(command, hera.query(command+'?'))
 
+# Sensor temperature
+init_commands['sensor_temp'] = hera.query(':MEAS:TEMP')
+
 # Get wavelengths
 hera.write(':get:wave')
 wl = np.frombuffer(hera.read_raw(), dtype='>f')
 
-spectra = wl
-# Make measurements
-int_range = range(16000, 300000, 5000)
-for n in int_range:
-    print(f"Int time {n}")
-    hera.write(f':SENS:INT {n}')
-    hera.write(':meas:spec')
-    sleep(n*10/1e6)
-    s = np.frombuffer(hera.read_raw(), dtype='>f')
-    spectra = np.column_stack((spectra, s[1:]))  # cosa c'è nel primo byte??
-    sleep(delay)
-
-datestr = date.today().strftime("%Y%m%d")
-filename = datestr + ' ' + sys.argv[1] + '.csv'
-np.savetxt(filename, spectra, header=str(init_commands))
-
-lo = plt.plot(wl, spectra[:,1:])
-#plt.legend(lo, int_range)
+spectra = [wl]
+fig = plt.figure()
+plt.xlim((450, 1000))
+plt.ylim((.9, 1.1))
 plt.grid()
+
+# Make measurements
+int_range = range(args.start, args.stop+1, args.step)
+for it in int_range:
+    hera.write(f':SENS:INT {it}')
+    hera.write(':meas:spec')
+    s_temp = []
+    clipping = 0
+    for n in range(args.n_meas):
+        hera.write(':meas:spec')
+        s = np.frombuffer(hera.read_raw(), dtype='>f')
+        clipping += s[0]
+        s_temp.append(s[1:])
+        sleep(delay)
+
+    print(f"Int time {it}, clipping {s[0]:.2f}")
+    s_temp = np.mean(np.column_stack(s_temp), axis=1)
+    spectra.append(s_temp)
+    plt.plot(wl, s_temp/spectra[1])
+    plt.pause(1)
+    
+plt.ioff()
+spectra = np.column_stack(spectra)
+datestr = date.today().strftime("%Y%m%d")
+filename = datestr + ' ' + args.name + '_it test.csv'
+init_commands['it_range'] = int_range
+np.savetxt(filename, spectra, header=str(init_commands))
 plt.show()
