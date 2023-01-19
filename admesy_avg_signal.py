@@ -1,27 +1,24 @@
 from time import sleep
 from datetime import date
 import numpy as np
+from scipy.signal import savgol_filter
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 import argparse
 import pyvisa
 
 parser = argparse.ArgumentParser()
-parser.add_argument("name", 
-                    help="name of file")
-parser.add_argument("-n", "--n_meas", type=int, default= 30,
-                    help="number of measurements to make")
 parser.add_argument("-d", "--delay", type=float, default=0.3, 
                     help="delay between measurements in seconds")
 parser.add_argument("-i", "--int_time", type=int, default=200000,
                     help="integration time in microseconds")
 parser.add_argument("-a", "--avg", type=int, default=1,
                     help="no. of measures for spectrometer internal averaging ")
-parser.add_argument("--raw", action="store_true",
-                    help="reads a raw spectrum")                    
+#parser.add_argument("--raw", action="store_true",
+#                    help="reads a raw spectrum")                    
                  
 args = parser.parse_args()
 
-n_meas = args.n_meas
 delay = args.delay  # s
 
 rm = pyvisa.ResourceManager('C:\WINDOWS\system32\\visa64.dll')
@@ -69,35 +66,31 @@ init_commands['sensor_temp'] = hera.query(':MEAS:TEMP')
 hera.write(':get:wave')
 wl = np.frombuffer(hera.read_raw(), dtype='>f')
 
-if args.raw:
-    spectra = []
-else:
-    spectra = [wl]
-    
-clipping = 0
-# Make measurements
-for n in range(n_meas):
-    if args.raw:
-        hera.write(':meas:rawspec')
-        spectra.append(np.frombuffer(hera.read_raw(), dtype='>f').astype(int))
-        print(f"Measurement {n}/{n_meas}")
-    else:    
-        hera.write(':meas:spec')
-        s = np.frombuffer(hera.read_raw(), dtype='>f')
-        print(f"Measurement {n}/{n_meas}, clipping {s[0]:.2f}") 
-        clipping += s[0]
-        spectra.append(s[1:])
-    sleep(delay)
-        
-spectra = np.column_stack(spectra)
-datestr = date.today().strftime("%Y%m%d")
-filename = datestr + ' ' + args.name + ('_raw' if args.raw else '') + '.csv'
-init_commands['clipping'] = clipping/n_meas
-np.savetxt(filename, spectra, header=str(init_commands)+str(args))
+def hera_read_raw():
+    hera.write(':meas:rawspec')
+    spectrum = np.frombuffer(hera.read_raw(), dtype='>f').astype(int)
+    return savgol_filter(spectrum, 51, 3)
 
-if args.raw:
-    plt.plot(spectra.mean(axis=1))
-else:
-    plt.plot(wl, spectra[:,1:].mean(axis=1))
-plt.grid()
+fig, ax = plt.subplots()
+max_spectrum = hera_read_raw()
+line, = plt.plot(range(len(max_spectrum)), max_spectrum)
+max_line, = plt.plot(range(len(max_spectrum)), max_spectrum, 'r')
+
+def update(frame):
+    global max_spectrum
+    spectrum = hera_read_raw()
+    if np.mean(max_spectrum) < np.mean(spectrum):
+        max_line.set_data(range(len(spectrum)), spectrum)
+        max_spectrum = spectrum
+
+    line.set_data(range(len(spectrum)), spectrum)
+    mean_spectrum = np.mean(spectrum)
+    mean_max_spectrum = np.mean(max_spectrum)
+    print(f"{mean_spectrum:.1f} \t {mean_max_spectrum:.1f} \t {mean_spectrum/mean_max_spectrum*100:.1f}", end='\r')
+    return line, max_line
+
+print("Avg \t Max \t %") 
+animation = FuncAnimation(fig, update, interval=delay, blit=True)
+
 plt.show()
+    

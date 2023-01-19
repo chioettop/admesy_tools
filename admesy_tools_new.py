@@ -3,6 +3,7 @@ import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
+from scipy.interpolate import interp1d
 import scipy.stats as st
 
 # parameters for Savgol filter
@@ -127,7 +128,7 @@ def plot_spectrum(x, sp, window=slice(None), ax=None, std=None,
     return ax
 
 def plot_measurement(refms, samplems, alref, window=slice(None), ax=None,
-                   ci=0.95, diff=False, label=None, ylabel=None, **kwargs):
+                   ci=0.95, err_bar=None, diff=False, label=None, ylabel=None, calc_only=False, **kwargs):
     """
     Calculates and plots a reflectivity measurement made with a reflectivity reference sample.
     
@@ -146,10 +147,14 @@ def plot_measurement(refms, samplems, alref, window=slice(None), ax=None,
         DESCRIPTION. The default is None.
     ci : float, optional
         confidence interval percentage to plot. Default is 95% (two sided).
+    err_bar: float, optional
+        error bar to plot on the graph, as +/- percentage of the measurement.
     diff : TYPE, optional
         DESCRIPTION. The default is False.
     ylabel : TYPE, optional
         DESCRIPTION. The default is None.
+    calc_only : bool, optional
+        calculate and return measurement, don't plot.
     **kwargs : TYPE
         DESCRIPTION.
 
@@ -172,10 +177,12 @@ def plot_measurement(refms, samplems, alref, window=slice(None), ax=None,
     assert (xs == x).all()
 
     # filter reference nominal reflectivity by measured wavelengths
-    wvls, indices_ref, indices_meas = np.intersect1d(alref[:,0], x, return_indices=True)
-    assert np.array_equal(x, wvls)  # only handle the case where x is a subset of alref_x
-    nref_r = alref[indices_ref][:,1]
-    
+    if alref is not None:
+        ref_interp = interp1d(alref[:,0], alref[:,1], fill_value="extrapolate")
+        nref_r = ref_interp(x)
+    else:
+        nref_r = 1
+        
     # calculate reflectivity and statistics
     ref_i = [m['i'] for m in ref]
     ref_mean = np.mean(ref_i, axis=0)
@@ -189,37 +196,67 @@ def plot_measurement(refms, samplems, alref, window=slice(None), ax=None,
     # remove hot pixels
     hp_in_x = np.isin(x, hp)
     R[hp_in_x] = np.NaN
-
-    if ax is None:
-        fig, ax = plt.subplots()
-        fig.suptitle(f"Reflectance measurement with ref {refms[0]}")
     
-    n = min(len(ref), len(sample))  # sample size
+    if not calc_only:
+        if ax is None:
+            fig, ax = plt.subplots()
+            fig.suptitle(f"Reflectance measurement with ref {refms[0]}")
 
-    if n > 1:
-        # more than one sample: we can calculate t statistic
-        std = np.abs(R) * np.sqrt(
-            (sample_stderr/sample_mean)**2 + (ref_stderr/ref_mean)**2
-        )  # error propagation (propagating standard error instead of std)
-        critical_value = st.t.ppf(.5 + ci/2, df=n-1)  # ppf returns the one-sided value
-        ci_hw = critical_value * std / np.sqrt(n)  # confidence interval half width
-        logger.info(f"ref n {len(ref)}, sample n {len(sample)}, \
-                     critical value {critical_value:.3f}")
-        ci_hw[hp_in_x] = np.NaN  # remove hot pixels
-        ax.set_title(f"({ci*100:.1f}% confidence interval)", fontsize=10)
+        n = min(len(ref), len(sample))  # sample size
 
-    else: 
-        ci_hw = None
+        if err_bar is not None:
+            ci_hw = R * err_bar
+        elif n > 1:
+            # more than one sample: we can calculate t statistic
+            std = np.abs(R) * np.sqrt(
+                (sample_stderr/sample_mean)**2 + (ref_stderr/ref_mean)**2
+            )  # error propagation (propagating standard error instead of std)
+            critical_value = st.t.ppf(.5 + ci/2, df=n-1)  # ppf returns the one-sided value
+            ci_hw = critical_value * std / np.sqrt(n)  # confidence interval half width
+            logger.info(f"ref n {len(ref)}, sample n {len(sample)}, \
+                         critical value {critical_value:.3f}")
+            ci_hw[hp_in_x] = np.NaN  # remove hot pixels
+            ax.set_title(f"({ci*100:.1f}% confidence interval)", fontsize=10)
+        else: 
+            ci_hw = None
+
+        if label is None:
+            label = f"{samplems[0]}, {n} measurements"
+
+        plot_spectrum(x, R, window, ax=ax, std=ci_hw, label=label, **kwargs)
+
+        if ylabel is None:
+            ylabel = 'Reflectance'
+        ax.set_ylabel(ylabel)
+
+        return ax
+    return R
+
+
+# Load and plot a series of measurements (one plot for each file)
+def compare_spectra(files, window=slice(None), ax=None, diff=False, ci=.95, **kwargs):
+    if type(files) is str:
+        files = glob.glob(files)
+    
+    assert files # assert files list is not empty
+    
+    measurements = []
+    for file in files:
+        measurements.append(load_avg_spectrum(file))
+
+    if diff:
+        avg_m = np.mean([m['i'] for m in measurements], axis=0)
+    else:
+        avg_m = 1   
+    
+    for m, file in zip(measurements, files):
+        ax = plot_spectrum(m['x'], m['i']/avg_m, window=window, std=m['std'], ax=ax, label=file + ', ' + str(m['n']) + ' meas.', ylabel='Intensity', **kwargs)
+    
+    if diff:
+        ax.set_title('Intensity/Avg. of Intensities')
         
-    if label is None:
-        label = f"{samplems[0]}, {n} measurements"
+    ax.legend()
     
-    plot_spectrum(x, R, window, ax=ax, std=ci_hw, label=label, **kwargs)
-
-    if ylabel is None:
-        ylabel = 'Reflectance'
-    ax.set_ylabel(ylabel)
-
     return ax
 
 
